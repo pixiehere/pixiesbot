@@ -37,8 +37,17 @@ YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
-    "default_search": "scsearch",
+    "default_search": "ytsearch",
     "source_address": "0.0.0.0",
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["ios", "web_creator"],
+            "player_skip": ["webpage", "configs"],
+        }
+    },
+    "http_headers": {
+        "User-Agent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+    },
 }
 
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
