@@ -1,0 +1,6 @@
+.env
+ffmpeg.exe
+venv/
+__pycache__/
+*.pyc
+*.pyo
