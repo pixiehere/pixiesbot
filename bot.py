@@ -1,9 +1,6 @@
 """
 PixiesMusic - A Discord Music Bot
 Commands: !play, !pause, !resume, !skip, !queue, !stop, !leave, !nowplaying
-
-Now Playing messages use an embed + interactive buttons:
-Pause/Resume, Skip, Stop, Loop toggle, Shuffle queue.
 """
 
 import os
@@ -20,26 +17,22 @@ import yt_dlp
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# ---------- Intents & Bot setup ----------
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- Embed palette ----------
-COLOR_NOW_PLAYING  = 0x6C63FF   # violet — signature track accent
-COLOR_QUEUED       = 0x22D3EE   # cyan  — item added
-COLOR_QUEUE_LIST   = 0x818CF8   # indigo — list view
-COLOR_SUCCESS      = 0x4ADE80   # green  — confirmations
-COLOR_WARNING      = 0xFBBF24   # amber  — warnings / errors
-COLOR_DANGER       = 0xF87171   # red    — stop / leave
+COLOR_NOW_PLAYING  = 0x6C63FF
+COLOR_QUEUED       = 0x22D3EE
+COLOR_QUEUE_LIST   = 0x818CF8
+COLOR_SUCCESS      = 0x4ADE80
+COLOR_WARNING      = 0xFBBF24
+COLOR_DANGER       = 0xF87171
 
 BOT_DISPLAY_NAME   = "PixiesMusic"
-BOT_ICON_URL       = "https://cdn.discordapp.com/embed/avatars/0.png"  # fallback; replace with your bot's avatar URL
-
+BOT_ICON_URL       = "https://cdn.discordapp.com/embed/avatars/0.png"
 MUSIC_NOTES        = ["🎵", "🎶", "🎸", "🎹", "🎺", "🎻", "🥁"]
 
-# ---------- yt-dlp / ffmpeg options ----------
 YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -61,35 +54,22 @@ FFMPEG_OPTS = {
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTS)
 
 
-# ════════════════════════════════════════════
-#  Helpers
-# ════════════════════════════════════════════
-
 def format_duration(seconds: int) -> str:
-    """Convert raw seconds → m:ss or h:mm:ss string."""
     if not seconds:
         return "∞  Live"
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
-    m, s   = divmod(rem, 60)
+    m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def progress_bar(position: int, total: int, length: int = 18) -> str:
-    """
-    Render a Unicode progress bar.
-    position and total are both in seconds.
-    Returns something like: ━━━━━━●────────────  1:23 / 3:45
-    """
     if not total:
         return "▬" * length + "  Live"
-
-    ratio    = max(0.0, min(1.0, position / total))
-    filled   = int(ratio * length)
-    bar      = "━" * filled + "●" + "─" * (length - filled)
-    pos_str  = format_duration(position)
-    tot_str  = format_duration(total)
-    return f"`{bar}`  {pos_str} / {tot_str}"
+    ratio = max(0.0, min(1.0, position / total))
+    filled = int(ratio * length)
+    bar = "━" * filled + "●" + "─" * (length - filled)
+    return f"`{bar}`  {format_duration(position)} / {format_duration(total)}"
 
 
 def timestamp_now() -> str:
@@ -100,19 +80,15 @@ def random_note() -> str:
     return random.choice(MUSIC_NOTES)
 
 
-# ════════════════════════════════════════════
-#  Per-guild state
-# ════════════════════════════════════════════
-
 class MusicState:
     def __init__(self, guild_id: int):
-        self.guild_id              = guild_id
-        self.queue: deque[dict]    = deque()
-        self.current: dict | None  = None
-        self.loop_current: bool    = False
+        self.guild_id = guild_id
+        self.queue: deque[dict] = deque()
+        self.current: dict | None = None
+        self.loop_current: bool = False
         self.now_playing_message: discord.Message | None = None
         self.text_channel: discord.abc.Messageable | None = None
-        self.start_time: float     = 0.0   # monotonic, for progress bar
+        self.start_time: float = 0.0
 
 
 guild_states: dict[int, MusicState] = {}
@@ -135,60 +111,35 @@ async def fetch_song(query: str, requester: discord.Member) -> dict:
 
     info = await loop.run_in_executor(None, extract)
     return {
-        "url":         info["url"],
-        "title":       info.get("title", "Unknown title"),
+        "url": info["url"],
+        "title": info.get("title", "Unknown title"),
         "webpage_url": info.get("webpage_url", ""),
-        "duration":    info.get("duration", 0),
-        "uploader":    info.get("uploader", "Unknown"),
-        "thumbnail":   info.get("thumbnail"),
-        "requester":   requester,
-        "view_count":  info.get("view_count", 0),
-        "like_count":  info.get("like_count", 0),
+        "duration": info.get("duration", 0),
+        "uploader": info.get("uploader", "Unknown"),
+        "thumbnail": info.get("thumbnail"),
+        "requester": requester,
+        "view_count": info.get("view_count", 0),
+        "like_count": info.get("like_count", 0),
     }
 
 
-# ════════════════════════════════════════════
-#  Embed builders
-# ════════════════════════════════════════════
-
 def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
-    """Rich violet Now Playing card with progress bar, metadata, and loop badge."""
-    note  = random_note()
-    title = song["title"]
-    url   = song["webpage_url"]
-    dur   = song["duration"]
-
-    # Elapsed time approximation
-    elapsed = int(asyncio.get_event_loop().time() - state.start_time) if state.start_time else 0
-    elapsed = min(elapsed, dur) if dur else elapsed
-
-    loop_badge  = "  `🔁 LOOP`" if state.loop_current else ""
+    note = random_note()
+    loop_badge = "  `🔁 LOOP`" if state.loop_current else ""
     queue_count = len(state.queue)
+    elapsed = int(asyncio.get_event_loop().time() - state.start_time) if state.start_time else 0
+    elapsed = min(elapsed, song["duration"]) if song["duration"] else elapsed
 
     embed = discord.Embed(
-        title       = f"{note}  Now Playing{loop_badge}",
-        description = f"### [{title}]({url})",
-        color       = COLOR_NOW_PLAYING,
-        timestamp   = datetime.utcnow(),
+        title=f"{note}  Now Playing{loop_badge}",
+        description=f"### [{song['title']}]({song['webpage_url']})",
+        color=COLOR_NOW_PLAYING,
+        timestamp=datetime.utcnow(),
     )
-
-    # Progress bar row
-    embed.add_field(
-        name   = "Progress",
-        value  = progress_bar(elapsed, dur),
-        inline = False,
-    )
-
-    # Metadata row 1
-    embed.add_field(name="⏱  Duration",      value=f"`{format_duration(dur)}`",              inline=True)
-    embed.add_field(name="🎤  Artist",         value=f"`{song.get('uploader', 'Unknown')}`",  inline=True)
-    embed.add_field(name="📥  Requested by",   value=song["requester"].mention,                inline=True)
-
-    # Metadata row 2
-    views = song.get("view_count") or 0
-    likes = song.get("like_count") or 0
-    embed.add_field(name="👁  Views",  value=f"`{views:,}`" if views else "`—`",  inline=True)
-    embed.add_field(name="👍  Likes",  value=f"`{likes:,}`" if likes else "`—`",  inline=True)
+    embed.add_field(name="Progress", value=progress_bar(elapsed, song["duration"]), inline=False)
+    embed.add_field(name="⏱  Duration", value=f"`{format_duration(song['duration'])}`", inline=True)
+    embed.add_field(name="🎤  Artist", value=f"`{song.get('uploader', 'Unknown')}`", inline=True)
+    embed.add_field(name="📥  Requested by", value=song["requester"].mention, inline=True)
     embed.add_field(name="📋  In Queue", value=f"`{queue_count} track{'s' if queue_count != 1 else ''}`", inline=True)
 
     if song.get("thumbnail"):
@@ -200,17 +151,16 @@ def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
 
 
 def build_added_to_queue_embed(song: dict, position: int) -> discord.Embed:
-    """Cyan confirmation card shown when a track is queued."""
     embed = discord.Embed(
-        title       = "🎵  Added to Queue",
-        description = f"**[{song['title']}]({song['webpage_url']})**",
-        color       = COLOR_QUEUED,
-        timestamp   = datetime.utcnow(),
+        title="🎵  Added to Queue",
+        description=f"**[{song['title']}]({song['webpage_url']})**",
+        color=COLOR_QUEUED,
+        timestamp=datetime.utcnow(),
     )
-    embed.add_field(name="⏱  Duration",    value=f"`{format_duration(song['duration'])}`", inline=True)
-    embed.add_field(name="🎤  Artist",      value=f"`{song.get('uploader', 'Unknown')}`",  inline=True)
-    embed.add_field(name="🔢  Position",    value=f"`#{position}`",                          inline=True)
-    embed.add_field(name="📥  Requested by", value=song["requester"].mention,                inline=False)
+    embed.add_field(name="⏱  Duration", value=f"`{format_duration(song['duration'])}`", inline=True)
+    embed.add_field(name="🎤  Artist", value=f"`{song.get('uploader', 'Unknown')}`", inline=True)
+    embed.add_field(name="🔢  Position", value=f"`#{position}`", inline=True)
+    embed.add_field(name="📥  Requested by", value=song["requester"].mention, inline=False)
 
     if song.get("thumbnail"):
         embed.set_thumbnail(url=song["thumbnail"])
@@ -221,35 +171,31 @@ def build_added_to_queue_embed(song: dict, position: int) -> discord.Embed:
 
 
 def build_queue_embed(state: MusicState) -> discord.Embed:
-    """Indigo paginated-style queue list."""
     embed = discord.Embed(
-        title       = "📋  Current Queue",
-        color       = COLOR_QUEUE_LIST,
-        timestamp   = datetime.utcnow(),
+        title="📋  Current Queue",
+        color=COLOR_QUEUE_LIST,
+        timestamp=datetime.utcnow(),
     )
 
     if state.current:
         cur = state.current
         embed.add_field(
-            name   = "▶️  Now Playing",
-            value  = f"[{cur['title']}]({cur['webpage_url']})  •  `{format_duration(cur['duration'])}`",
-            inline = False,
+            name="▶️  Now Playing",
+            value=f"[{cur['title']}]({cur['webpage_url']})  •  `{format_duration(cur['duration'])}`",
+            inline=False,
         )
 
     if state.queue:
         total_dur = sum(s.get("duration", 0) for s in state.queue)
         lines = []
-        for i, song in enumerate(list(state.queue)[:15], 1):  # cap at 15
-            dur_str = format_duration(song["duration"])
-            lines.append(f"`{i:>2}.`  **{song['title']}**  •  `{dur_str}`")
-
+        for i, song in enumerate(list(state.queue)[:15], 1):
+            lines.append(f"`{i:>2}.`  **{song['title']}**  •  `{format_duration(song['duration'])}`")
         if len(state.queue) > 15:
             lines.append(f"\n*… and {len(state.queue) - 15} more tracks*")
-
         embed.add_field(
-            name   = f"⏩  Up Next  —  {len(state.queue)} track{'s' if len(state.queue) != 1 else ''}  •  `{format_duration(total_dur)}` total",
-            value  = "\n".join(lines),
-            inline = False,
+            name=f"⏩  Up Next  —  {len(state.queue)} tracks  •  `{format_duration(total_dur)}` total",
+            value="\n".join(lines),
+            inline=False,
         )
     else:
         embed.add_field(name="Up Next", value="*Queue is empty — add songs with* `!play`", inline=False)
@@ -259,18 +205,12 @@ def build_queue_embed(state: MusicState) -> discord.Embed:
     return embed
 
 
-def build_status_embed(
-    title: str,
-    description: str,
-    color: int = COLOR_SUCCESS,
-    emoji: str = "✅",
-) -> discord.Embed:
-    """Generic one-liner status card (pause, resume, skip, stop, etc.)."""
+def build_status_embed(title: str, description: str, color: int = COLOR_SUCCESS, emoji: str = "✅") -> discord.Embed:
     embed = discord.Embed(
-        title       = f"{emoji}  {title}",
-        description = description,
-        color       = color,
-        timestamp   = datetime.utcnow(),
+        title=f"{emoji}  {title}",
+        description=description,
+        color=color,
+        timestamp=datetime.utcnow(),
     )
     embed.set_author(name=BOT_DISPLAY_NAME, icon_url=BOT_ICON_URL)
     embed.set_footer(text=timestamp_now())
@@ -280,10 +220,6 @@ def build_status_embed(
 def build_error_embed(description: str) -> discord.Embed:
     return build_status_embed("Oops!", description, color=COLOR_WARNING, emoji="⚠️")
 
-
-# ════════════════════════════════════════════
-#  Interactive Controls View
-# ════════════════════════════════════════════
 
 class MusicControls(discord.ui.View):
     def __init__(self, guild_id: int):
@@ -313,7 +249,7 @@ class MusicControls(discord.ui.View):
         vc = self._vc(interaction)
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
-            await interaction.response.send_message(embed=build_status_embed("Skipped", "Track skipped — up next shortly.", COLOR_SUCCESS, "⏭️"), ephemeral=True)
+            await interaction.response.send_message(embed=build_status_embed("Skipped", "Track skipped.", COLOR_SUCCESS, "⏭️"), ephemeral=True)
         else:
             await interaction.response.send_message(embed=build_error_embed("Nothing is currently playing."), ephemeral=True)
 
@@ -335,7 +271,7 @@ class MusicControls(discord.ui.View):
         state = get_state(self.guild_id)
         state.loop_current = not state.loop_current
         status = "enabled" if state.loop_current else "disabled"
-        color  = COLOR_SUCCESS if state.loop_current else COLOR_WARNING
+        color = COLOR_SUCCESS if state.loop_current else COLOR_WARNING
         await interaction.response.send_message(
             embed=build_status_embed("Loop", f"Loop has been **{status}**.", color, "🔁"),
             ephemeral=True,
@@ -364,25 +300,21 @@ class MusicControls(discord.ui.View):
         await interaction.response.send_message(embed=build_queue_embed(state), ephemeral=True)
 
 
-# ════════════════════════════════════════════
-#  Playback engine
-# ════════════════════════════════════════════
-
-async def play_next(guild: discord.Guild):
-    state        = get_state(guild.id)
+def play_next(guild: discord.Guild):
+    state = get_state(guild.id)
     voice_client = guild.voice_client
 
-    if voice_client is None:
+    if voice_client is None or not voice_client.is_connected():
         return
 
     if state.loop_current and state.current is not None:
         song = state.current
     elif state.queue:
-        song         = state.queue.popleft()
+        song = state.queue.popleft()
         state.current = song
     else:
         state.current = None
-        # Post a "Queue finished" notice
+
         async def notify_done():
             if state.text_channel:
                 embed = build_status_embed(
@@ -392,10 +324,10 @@ async def play_next(guild: discord.Guild):
                     "🎶",
                 )
                 await state.text_channel.send(embed=embed)
+
         asyncio.run_coroutine_threadsafe(notify_done(), bot.loop)
         return
 
-    await asyncio.sleep(1)
     source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTS)
 
     def after_play(error):
@@ -403,22 +335,22 @@ async def play_next(guild: discord.Guild):
             print(f"Playback error: {error}")
         play_next(guild)
 
-    voice_client.play(source, after=after_play)
-    state.start_time = asyncio.get_event_loop().time()
+    try:
+        voice_client.play(source, after=after_play)
+        state.start_time = asyncio.get_event_loop().time()
+    except Exception as e:
+        print(f"Error playing: {e}")
+        return
 
     async def send_now_playing():
         embed = build_now_playing_embed(song, state)
-        view  = MusicControls(guild.id)
+        view = MusicControls(guild.id)
         if state.text_channel:
             msg = await state.text_channel.send(embed=embed, view=view)
             state.now_playing_message = msg
 
     asyncio.run_coroutine_threadsafe(send_now_playing(), bot.loop)
 
-
-# ════════════════════════════════════════════
-#  Events
-# ════════════════════════════════════════════
 
 @bot.event
 async def on_ready():
@@ -428,31 +360,33 @@ async def on_ready():
     )
 
 
-# ════════════════════════════════════════════
-#  Commands
-# ════════════════════════════════════════════
-
-@bot.command(name="play", help="Play a song by name or YouTube URL")
+@bot.command(name="play", help="Play a song by name")
 async def play(ctx, *, query: str):
     if not ctx.author.voice:
         await ctx.send(embed=build_error_embed("You need to join a voice channel first."))
         return
 
     voice_channel = ctx.author.voice.channel
-    voice_client  = ctx.guild.voice_client
+    voice_client = ctx.guild.voice_client
 
     if voice_client is None:
-        voice_client = await voice_channel.connect()
+        try:
+            voice_client = await voice_channel.connect()
+            await asyncio.sleep(1.5)  # wait for connection to stabilize
+        except Exception as e:
+            await ctx.send(embed=build_error_embed(f"Could not connect to voice channel: {e}"))
+            return
     elif voice_client.channel != voice_channel:
         await voice_client.move_to(voice_channel)
+        await asyncio.sleep(1)
 
-    state             = get_state(ctx.guild.id)
+    state = get_state(ctx.guild.id)
     state.text_channel = ctx.channel
 
     searching_embed = discord.Embed(
-        title       = "🔎  Searching…",
-        description = f"Looking up **{query}**",
-        color       = COLOR_QUEUED,
+        title="🔎  Searching…",
+        description=f"Looking up **{query}**",
+        color=COLOR_QUEUED,
     )
     searching_embed.set_author(name=BOT_DISPLAY_NAME, icon_url=BOT_ICON_URL)
     searching_msg = await ctx.send(embed=searching_embed)
@@ -465,11 +399,9 @@ async def play(ctx, *, query: str):
 
     state.queue.append(song)
     position = len(state.queue)
-
     await searching_msg.edit(embed=build_added_to_queue_embed(song, position))
 
-   if not voice_client.is_playing() and not voice_client.is_paused():
-        await asyncio.sleep(2)
+    if not voice_client.is_playing() and not voice_client.is_paused():
         play_next(ctx.guild)
 
 
@@ -512,7 +444,7 @@ async def show_queue(ctx):
 @bot.command(name="nowplaying", aliases=["np"], help="Show the currently playing song")
 async def now_playing(ctx):
     state = get_state(ctx.guild.id)
-    vc    = ctx.guild.voice_client
+    vc = ctx.guild.voice_client
     if vc and (vc.is_playing() or vc.is_paused()) and state.current:
         await ctx.send(embed=build_now_playing_embed(state.current, state), view=MusicControls(ctx.guild.id))
     else:
@@ -521,10 +453,10 @@ async def now_playing(ctx):
 
 @bot.command(name="loop", help="Toggle looping the current song")
 async def loop_cmd(ctx):
-    state              = get_state(ctx.guild.id)
+    state = get_state(ctx.guild.id)
     state.loop_current = not state.loop_current
     status = "enabled" if state.loop_current else "disabled"
-    color  = COLOR_SUCCESS if state.loop_current else COLOR_WARNING
+    color = COLOR_SUCCESS if state.loop_current else COLOR_WARNING
     await ctx.send(embed=build_status_embed("Loop", f"Loop has been **{status}**.", color, "🔁"))
 
 
@@ -537,12 +469,12 @@ async def shuffle_cmd(ctx):
     items = list(state.queue)
     random.shuffle(items)
     state.queue = deque(items)
-    await ctx.send(embed=build_status_embed("Shuffled", f"Queue of **{len(items)}** tracks has been shuffled.", COLOR_SUCCESS, "🔀"))
+    await ctx.send(embed=build_status_embed("Shuffled", f"Queue of **{len(items)}** tracks shuffled.", COLOR_SUCCESS, "🔀"))
 
 
 @bot.command(name="stop", help="Stop playback and clear the queue")
 async def stop(ctx):
-    state         = get_state(ctx.guild.id)
+    state = get_state(ctx.guild.id)
     state.queue.clear()
     state.current = None
     vc = ctx.guild.voice_client
@@ -553,7 +485,7 @@ async def stop(ctx):
 
 @bot.command(name="leave", help="Disconnect the bot from voice")
 async def leave(ctx):
-    vc    = ctx.guild.voice_client
+    vc = ctx.guild.voice_client
     state = get_state(ctx.guild.id)
     if vc:
         state.queue.clear()
