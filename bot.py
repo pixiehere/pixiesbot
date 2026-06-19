@@ -368,7 +368,7 @@ class MusicControls(discord.ui.View):
 #  Playback engine
 # ════════════════════════════════════════════
 
-def play_next(guild: discord.Guild):
+async def play_next(guild: discord.Guild):
     state        = get_state(guild.id)
     voice_client = guild.voice_client
 
@@ -395,6 +395,7 @@ def play_next(guild: discord.Guild):
         asyncio.run_coroutine_threadsafe(notify_done(), bot.loop)
         return
 
+    await asyncio.sleep(1)
     source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTS)
 
     def after_play(error):
@@ -467,7 +468,8 @@ async def play(ctx, *, query: str):
 
     await searching_msg.edit(embed=build_added_to_queue_embed(song, position))
 
-    if not voice_client.is_playing() and not voice_client.is_paused():
+   if not voice_client.is_playing() and not voice_client.is_paused():
+        await asyncio.sleep(2)
         play_next(ctx.guild)
 
 
