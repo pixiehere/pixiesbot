@@ -134,8 +134,11 @@ async def search_jiosaavn(query: str) -> dict | None:
 async def fetch_song(query: str, requester: discord.Member) -> dict:
     """Try JioSaavn first, fall back to yt-dlp (SoundCloud)."""
 
-    # Try JioSaavn first
-    result = await search_jiosaavn(query)
+    # Skip JioSaavn for YouTube/SoundCloud URLs
+    is_url = query.startswith("http://") or query.startswith("https://")
+
+    if not is_url:
+        result = await search_jiosaavn(query)
     if result:
         result["requester"] = requester
         return result
