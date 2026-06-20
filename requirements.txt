@@ -1,5 +1,4 @@
 discord.py[voice]
-yt-dlp
-python-dotenv
 PyNaCl==1.5.0
+python-dotenv
 aiohttp
