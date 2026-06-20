@@ -1,6 +1,6 @@
 """
 PixiesMusic - Discord Music Bot
-Source: JioSaavn API (search by name) - 320kbps, no bot detection, no YouTube
+Sources: JioSaavn → Deezer fallback
 Commands: !play, !pause, !resume, !skip, !queue, !stop, !leave, !nowplaying, !loop, !shuffle
 """
 
@@ -22,7 +22,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ── Colors ──
 COLOR_NOW_PLAYING = 0x6C63FF
 COLOR_QUEUED      = 0x22D3EE
 COLOR_QUEUE_LIST  = 0x818CF8
@@ -44,78 +43,144 @@ FFMPEG_OPTS = {
     "options": "-vn",
 }
 
-SAAVN_API = "https://saavn.dev/api"
-
 
 # ════════════════════════════════════════════
-#  JioSaavn Search & Stream
+#  JioSaavn Search
 # ════════════════════════════════════════════
 
 async def search_jiosaavn(query: str) -> dict | None:
+    """Search JioSaavn API and return song with stream URL."""
+    apis = [
+        "https://saavn.dev/api",
+        "https://jiosaavn-api-privatecvc2.vercel.app/api",
+    ]
+    for base in apis:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base}/search/songs",
+                    params={"query": query, "limit": 5},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+
+            results = data.get("data", {}).get("results", [])
+            if not results:
+                continue
+
+            # Try each result until we find one with a working stream URL
+            for song in results:
+                stream_url = None
+                for quality in ["320kbps", "160kbps", "96kbps", "48kbps"]:
+                    for d in song.get("downloadUrl", []):
+                        if d.get("quality") == quality and d.get("url"):
+                            stream_url = d["url"]
+                            break
+                    if stream_url:
+                        break
+
+                if not stream_url:
+                    urls = song.get("downloadUrl", [])
+                    if urls:
+                        stream_url = urls[-1].get("url")
+
+                if not stream_url:
+                    continue
+
+                thumbnail = None
+                for img in reversed(song.get("image", [])):
+                    if img.get("url"):
+                        thumbnail = img["url"]
+                        break
+
+                artists = song.get("artists", {}).get("primary", [])
+                artist_str = ", ".join(a["name"] for a in artists if a.get("name")) or "Unknown"
+
+                return {
+                    "url":         stream_url,
+                    "title":       song.get("name", "Unknown"),
+                    "webpage_url": song.get("url", ""),
+                    "duration":    int(song.get("duration", 0)),
+                    "uploader":    artist_str,
+                    "thumbnail":   thumbnail,
+                    "source":      "JioSaavn 🎵",
+                }
+
+        except Exception as e:
+            print(f"[JioSaavn:{base}] {e}")
+            continue
+
+    return None
+
+
+# ════════════════════════════════════════════
+#  Deezer Fallback (30s previews — free, no auth)
+# ════════════════════════════════════════════
+
+async def search_deezer(query: str) -> dict | None:
+    """Search Deezer API — returns 30s preview clips, no auth needed."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{SAAVN_API}/search/songs",
-                params={"query": query, "limit": 1},
-                timeout=aiohttp.ClientTimeout(total=15),
+                "https://api.deezer.com/search",
+                params={"q": query, "limit": 1},
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
 
-        results = data.get("data", {}).get("results", [])
-        if not results:
+        tracks = data.get("data", [])
+        if not tracks:
             return None
 
-        song = results[0]
-
-        # Get best quality stream URL
-        stream_url = None
-        for quality in ["320kbps", "160kbps", "96kbps", "48kbps"]:
-            for d in song.get("downloadUrl", []):
-                if d.get("quality") == quality and d.get("url"):
-                    stream_url = d["url"]
-                    break
-            if stream_url:
-                break
-
-        if not stream_url:
-            urls = song.get("downloadUrl", [])
-            if urls:
-                stream_url = urls[-1].get("url")
-
-        if not stream_url:
+        track = tracks[0]
+        preview = track.get("preview")
+        if not preview:
             return None
-
-        # Thumbnail
-        thumbnail = None
-        for img in reversed(song.get("image", [])):
-            if img.get("url"):
-                thumbnail = img["url"]
-                break
-
-        # Artists
-        artists = song.get("artists", {}).get("primary", [])
-        artist_str = ", ".join(a["name"] for a in artists if a.get("name")) or "Unknown"
 
         return {
-            "url":         stream_url,
-            "title":       song.get("name", "Unknown"),
-            "webpage_url": song.get("url", ""),
-            "duration":    int(song.get("duration", 0)),
-            "uploader":    artist_str,
-            "thumbnail":   thumbnail,
+            "url":         preview,
+            "title":       track.get("title", "Unknown"),
+            "webpage_url": track.get("link", ""),
+            "duration":    track.get("duration", 30),
+            "uploader":    track.get("artist", {}).get("name", "Unknown"),
+            "thumbnail":   track.get("album", {}).get("cover_medium"),
+            "source":      "Deezer 🎧 (30s preview)",
         }
-
     except Exception as e:
-        print(f"[JioSaavn] Error: {e}")
+        print(f"[Deezer] {e}")
         return None
 
 
+# ════════════════════════════════════════════
+#  Main fetch — JioSaavn → Deezer
+# ════════════════════════════════════════════
+
 async def fetch_song(query: str, requester: discord.Member) -> dict:
+    # 1. Try JioSaavn (full song)
     result = await search_jiosaavn(query)
+
+    # 2. Try simplified query on JioSaavn
+    if result is None and len(query.split()) > 2:
+        simplified = " ".join(query.split()[:3])
+        print(f"[Retry] Simplified query: {simplified}")
+        result = await search_jiosaavn(simplified)
+
+    # 3. Fallback to Deezer (30s preview)
     if result is None:
-        raise ValueError(f"No results found for **{query}** on JioSaavn. Try a different song name.")
+        print(f"[Fallback] Trying Deezer for: {query}")
+        result = await search_deezer(query)
+
+    if result is None:
+        raise ValueError(
+            f"No results found for **{query}**.\n"
+            "Try a shorter or different song name, e.g. `!play apna bana le arijit`"
+        )
+
     result["requester"] = requester
     return result
 
@@ -191,7 +256,7 @@ def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
     embed.add_field(name="🎤  Artist",    value=f"`{song.get('uploader', 'Unknown')}`",   inline=True)
     embed.add_field(name="📥  Requested", value=song["requester"].mention,                 inline=True)
     embed.add_field(name="📋  In Queue",  value=f"`{len(state.queue)} tracks`",            inline=True)
-    embed.add_field(name="🎵  Source",    value="JioSaavn 320kbps",                        inline=True)
+    embed.add_field(name="🔗  Source",    value=song.get("source", "JioSaavn"),            inline=True)
 
     if song.get("thumbnail"):
         embed.set_thumbnail(url=song["thumbnail"])
@@ -211,6 +276,7 @@ def build_added_embed(song: dict, position: int) -> discord.Embed:
     embed.add_field(name="⏱  Duration",   value=f"`{format_duration(song['duration'])}`", inline=True)
     embed.add_field(name="🎤  Artist",    value=f"`{song.get('uploader', 'Unknown')}`",   inline=True)
     embed.add_field(name="🔢  Position",  value=f"`#{position}`",                          inline=True)
+    embed.add_field(name="🔗  Source",    value=song.get("source", "JioSaavn"),            inline=True)
     embed.add_field(name="📥  Requested", value=song["requester"].mention,                 inline=False)
 
     if song.get("thumbnail"):
@@ -387,7 +453,7 @@ def play_next(guild: discord.Guild):
 
 
 # ════════════════════════════════════════════
-#  Events
+#  Events & Commands
 # ════════════════════════════════════════════
 
 @bot.event
@@ -395,10 +461,6 @@ async def on_ready():
     print(f"{BOT_DISPLAY_NAME} online as {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!play"))
 
-
-# ════════════════════════════════════════════
-#  Commands
-# ════════════════════════════════════════════
 
 @bot.command(name="play", help="Play a song by name")
 async def play(ctx, *, query: str):
@@ -422,9 +484,9 @@ async def play(ctx, *, query: str):
     state.text_channel = ctx.channel
 
     msg = await ctx.send(embed=discord.Embed(
-        title="🔎  Searching…",
-        description=f"Looking up **{query}** on JioSaavn",
-        color=COLOR_QUEUED,
+        title       = "🔎  Searching…",
+        description = f"Looking up **{query}**",
+        color       = COLOR_QUEUED,
     ).set_author(name=BOT_DISPLAY_NAME, icon_url=BOT_ICON_URL))
 
     try:
