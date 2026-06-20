@@ -1,11 +1,13 @@
 """
 PixiesMusic - A Discord Music Bot
+Uses JioSaavn API for music streaming - no DRM, no bot detection, works on cloud servers
 Commands: !play, !pause, !resume, !skip, !queue, !stop, !leave, !nowplaying
 """
 
 import os
 import random
 import asyncio
+import aiohttp
 from collections import deque
 from datetime import datetime
 
@@ -22,17 +24,18 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-COLOR_NOW_PLAYING  = 0x6C63FF
-COLOR_QUEUED       = 0x22D3EE
-COLOR_QUEUE_LIST   = 0x818CF8
-COLOR_SUCCESS      = 0x4ADE80
-COLOR_WARNING      = 0xFBBF24
-COLOR_DANGER       = 0xF87171
+COLOR_NOW_PLAYING = 0x6C63FF
+COLOR_QUEUED      = 0x22D3EE
+COLOR_QUEUE_LIST  = 0x818CF8
+COLOR_SUCCESS     = 0x4ADE80
+COLOR_WARNING     = 0xFBBF24
+COLOR_DANGER      = 0xF87171
 
-BOT_DISPLAY_NAME   = "PixiesMusic"
-BOT_ICON_URL       = "https://cdn.discordapp.com/embed/avatars/0.png"
-MUSIC_NOTES        = ["🎵", "🎶", "🎸", "🎹", "🎺", "🎻", "🥁"]
+BOT_DISPLAY_NAME  = "PixiesMusic"
+BOT_ICON_URL      = "https://cdn.discordapp.com/embed/avatars/0.png"
+MUSIC_NOTES       = ["🎵", "🎶", "🎸", "🎹", "🎺", "🎻", "🥁"]
 
+# yt-dlp as fallback only
 YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -53,6 +56,115 @@ FFMPEG_OPTS = {
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTS)
 
+
+# ════════════════════════════════════════════
+#  JioSaavn API
+# ════════════════════════════════════════════
+
+SAAVN_API = "https://saavn.dev/api"
+
+
+async def search_jiosaavn(query: str) -> dict | None:
+    """Search JioSaavn and return best match with stream URL."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Search for the song
+            async with session.get(
+                f"{SAAVN_API}/search/songs",
+                params={"query": query, "limit": 1},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+
+            results = data.get("data", {}).get("results", [])
+            if not results:
+                return None
+
+            song = results[0]
+
+            # Get highest quality stream URL
+            download_urls = song.get("downloadUrl", [])
+            stream_url = None
+            for quality in ["320kbps", "160kbps", "96kbps", "48kbps"]:
+                for d in download_urls:
+                    if d.get("quality") == quality:
+                        stream_url = d.get("url")
+                        break
+                if stream_url:
+                    break
+
+            if not stream_url and download_urls:
+                stream_url = download_urls[-1].get("url")
+
+            if not stream_url:
+                return None
+
+            # Get duration
+            duration = int(song.get("duration", 0))
+
+            # Get thumbnail
+            images = song.get("image", [])
+            thumbnail = None
+            for img in reversed(images):  # get highest quality
+                thumbnail = img.get("url")
+                if thumbnail:
+                    break
+
+            # Get artists
+            artists = song.get("artists", {}).get("primary", [])
+            artist_names = ", ".join([a.get("name", "") for a in artists]) or "Unknown"
+
+            return {
+                "url": stream_url,
+                "title": song.get("name", "Unknown"),
+                "webpage_url": song.get("url", ""),
+                "duration": duration,
+                "uploader": artist_names,
+                "thumbnail": thumbnail,
+                "source": "jiosaavn",
+            }
+
+    except Exception as e:
+        print(f"JioSaavn error: {e}")
+        return None
+
+
+async def fetch_song(query: str, requester: discord.Member) -> dict:
+    """Try JioSaavn first, fall back to yt-dlp (SoundCloud)."""
+
+    # Try JioSaavn first
+    result = await search_jiosaavn(query)
+    if result:
+        result["requester"] = requester
+        return result
+
+    # Fallback: yt-dlp with SoundCloud
+    loop = asyncio.get_event_loop()
+
+    def extract():
+        info = ytdl.extract_info(query, download=False)
+        if "entries" in info:
+            info = info["entries"][0]
+        return info
+
+    info = await loop.run_in_executor(None, extract)
+    return {
+        "url": info["url"],
+        "title": info.get("title", "Unknown title"),
+        "webpage_url": info.get("webpage_url", ""),
+        "duration": info.get("duration", 0),
+        "uploader": info.get("uploader", "Unknown"),
+        "thumbnail": info.get("thumbnail"),
+        "requester": requester,
+        "source": "soundcloud",
+    }
+
+
+# ════════════════════════════════════════════
+#  Helpers
+# ════════════════════════════════════════════
 
 def format_duration(seconds: int) -> str:
     if not seconds:
@@ -80,6 +192,10 @@ def random_note() -> str:
     return random.choice(MUSIC_NOTES)
 
 
+# ════════════════════════════════════════════
+#  Per-guild state
+# ════════════════════════════════════════════
+
 class MusicState:
     def __init__(self, guild_id: int):
         self.guild_id = guild_id
@@ -100,28 +216,9 @@ def get_state(guild_id: int) -> MusicState:
     return guild_states[guild_id]
 
 
-async def fetch_song(query: str, requester: discord.Member) -> dict:
-    loop = asyncio.get_event_loop()
-
-    def extract():
-        info = ytdl.extract_info(query, download=False)
-        if "entries" in info:
-            info = info["entries"][0]
-        return info
-
-    info = await loop.run_in_executor(None, extract)
-    return {
-        "url": info["url"],
-        "title": info.get("title", "Unknown title"),
-        "webpage_url": info.get("webpage_url", ""),
-        "duration": info.get("duration", 0),
-        "uploader": info.get("uploader", "Unknown"),
-        "thumbnail": info.get("thumbnail"),
-        "requester": requester,
-        "view_count": info.get("view_count", 0),
-        "like_count": info.get("like_count", 0),
-    }
-
+# ════════════════════════════════════════════
+#  Embed builders
+# ════════════════════════════════════════════
 
 def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
     note = random_note()
@@ -129,6 +226,7 @@ def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
     queue_count = len(state.queue)
     elapsed = int(asyncio.get_event_loop().time() - state.start_time) if state.start_time else 0
     elapsed = min(elapsed, song["duration"]) if song["duration"] else elapsed
+    source_badge = "🎵 JioSaavn" if song.get("source") == "jiosaavn" else "☁️ SoundCloud"
 
     embed = discord.Embed(
         title=f"{note}  Now Playing{loop_badge}",
@@ -141,6 +239,7 @@ def build_now_playing_embed(song: dict, state: MusicState) -> discord.Embed:
     embed.add_field(name="🎤  Artist", value=f"`{song.get('uploader', 'Unknown')}`", inline=True)
     embed.add_field(name="📥  Requested by", value=song["requester"].mention, inline=True)
     embed.add_field(name="📋  In Queue", value=f"`{queue_count} track{'s' if queue_count != 1 else ''}`", inline=True)
+    embed.add_field(name="🔗  Source", value=source_badge, inline=True)
 
     if song.get("thumbnail"):
         embed.set_thumbnail(url=song["thumbnail"])
@@ -221,6 +320,10 @@ def build_error_embed(description: str) -> discord.Embed:
     return build_status_embed("Oops!", description, color=COLOR_WARNING, emoji="⚠️")
 
 
+# ════════════════════════════════════════════
+#  Interactive Controls
+# ════════════════════════════════════════════
+
 class MusicControls(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
@@ -300,6 +403,10 @@ class MusicControls(discord.ui.View):
         await interaction.response.send_message(embed=build_queue_embed(state), ephemeral=True)
 
 
+# ════════════════════════════════════════════
+#  Playback engine
+# ════════════════════════════════════════════
+
 def play_next(guild: discord.Guild):
     state = get_state(guild.id)
     voice_client = guild.voice_client
@@ -317,13 +424,9 @@ def play_next(guild: discord.Guild):
 
         async def notify_done():
             if state.text_channel:
-                embed = build_status_embed(
-                    "Queue Finished",
-                    "All tracks have been played. Add more with `!play`!",
-                    COLOR_QUEUE_LIST,
-                    "🎶",
+                await state.text_channel.send(
+                    embed=build_status_embed("Queue Finished", "All tracks played. Add more with `!play`!", COLOR_QUEUE_LIST, "🎶")
                 )
-                await state.text_channel.send(embed=embed)
 
         asyncio.run_coroutine_threadsafe(notify_done(), bot.loop)
         return
@@ -352,6 +455,10 @@ def play_next(guild: discord.Guild):
     asyncio.run_coroutine_threadsafe(send_now_playing(), bot.loop)
 
 
+# ════════════════════════════════════════════
+#  Events & Commands
+# ════════════════════════════════════════════
+
 @bot.event
 async def on_ready():
     print(f"{BOT_DISPLAY_NAME} is online as {bot.user}")
@@ -372,7 +479,7 @@ async def play(ctx, *, query: str):
     if voice_client is None:
         try:
             voice_client = await voice_channel.connect()
-            await asyncio.sleep(1.5)  # wait for connection to stabilize
+            await asyncio.sleep(1.5)
         except Exception as e:
             await ctx.send(embed=build_error_embed(f"Could not connect to voice channel: {e}"))
             return
