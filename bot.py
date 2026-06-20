@@ -1,6 +1,6 @@
 """
 PixiesMusic - Discord Music Bot
-Sources: JioSaavn → Deezer fallback
+Source: Self-hosted JioSaavn API on Railway
 Commands: !play, !pause, !resume, !skip, !queue, !stop, !leave, !nowplaying, !loop, !shuffle
 """
 
@@ -33,6 +33,9 @@ BOT_DISPLAY_NAME  = "PixiesMusic"
 BOT_ICON_URL      = "https://cdn.discordapp.com/embed/avatars/0.png"
 MUSIC_NOTES       = ["🎵", "🎶", "🎸", "🎹", "🎺", "🎻", "🥁"]
 
+# ── Your self-hosted JioSaavn API ──
+SAAVN_BASE = "https://jiosaavn-api-production-e836.up.railway.app"
+
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 if not os.path.isfile(FFMPEG_PATH):
     FFMPEG_PATH = "ffmpeg"
@@ -49,136 +52,132 @@ FFMPEG_OPTS = {
 # ════════════════════════════════════════════
 
 async def search_jiosaavn(query: str) -> dict | None:
-    """Search JioSaavn API and return song with stream URL."""
-    apis = [
-        "https://saavn.dev/api",
-        "https://jiosaavn-api-privatecvc2.vercel.app/api",
+    """Search self-hosted JioSaavn API."""
+    # Try multiple endpoint patterns used by different JioSaavn API versions
+    endpoints = [
+        f"{SAAVN_BASE}/api/search/songs?query={query}&limit=5",
+        f"{SAAVN_BASE}/search/songs?query={query}&limit=5",
+        f"{SAAVN_BASE}/search?query={query}&limit=5",
+        f"{SAAVN_BASE}/song?query={query}",
     ]
-    for base in apis:
-        try:
-            async with aiohttp.ClientSession() as session:
+
+    async with aiohttp.ClientSession() as session:
+        for endpoint in endpoints:
+            try:
                 async with session.get(
-                    f"{base}/search/songs",
-                    params={"query": query, "limit": 5},
+                    endpoint,
                     timeout=aiohttp.ClientTimeout(total=15),
                     headers={"User-Agent": "Mozilla/5.0"},
                 ) as resp:
                     if resp.status != 200:
                         continue
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
 
-            results = data.get("data", {}).get("results", [])
-            if not results:
-                continue
+                # Handle different response formats
+                results = []
+                if isinstance(data, list):
+                    results = data
+                elif isinstance(data, dict):
+                    results = (
+                        data.get("data", {}).get("results")
+                        or data.get("results")
+                        or data.get("songs")
+                        or data.get("data")
+                        or []
+                    )
+                    if isinstance(results, dict):
+                        results = [results]
 
-            # Try each result until we find one with a working stream URL
-            for song in results:
-                stream_url = None
-                for quality in ["320kbps", "160kbps", "96kbps", "48kbps"]:
-                    for d in song.get("downloadUrl", []):
-                        if d.get("quality") == quality and d.get("url"):
-                            stream_url = d["url"]
-                            break
-                    if stream_url:
-                        break
-
-                if not stream_url:
-                    urls = song.get("downloadUrl", [])
-                    if urls:
-                        stream_url = urls[-1].get("url")
-
-                if not stream_url:
+                if not results:
                     continue
 
-                thumbnail = None
-                for img in reversed(song.get("image", [])):
-                    if img.get("url"):
-                        thumbnail = img["url"]
-                        break
+                print(f"[JioSaavn] Got {len(results)} results from {endpoint}")
 
-                artists = song.get("artists", {}).get("primary", [])
-                artist_str = ", ".join(a["name"] for a in artists if a.get("name")) or "Unknown"
+                for song in results:
+                    stream_url = None
 
-                return {
-                    "url":         stream_url,
-                    "title":       song.get("name", "Unknown"),
-                    "webpage_url": song.get("url", ""),
-                    "duration":    int(song.get("duration", 0)),
-                    "uploader":    artist_str,
-                    "thumbnail":   thumbnail,
-                    "source":      "JioSaavn 🎵",
-                }
+                    # Format 1: downloadUrl array with quality
+                    for quality in ["320kbps", "160kbps", "96kbps", "48kbps"]:
+                        for d in song.get("downloadUrl", []):
+                            if d.get("quality") == quality and d.get("url"):
+                                stream_url = d["url"]
+                                break
+                        if stream_url:
+                            break
 
-        except Exception as e:
-            print(f"[JioSaavn:{base}] {e}")
-            continue
+                    # Format 2: direct url field
+                    if not stream_url:
+                        stream_url = (
+                            song.get("url")
+                            or song.get("media_url")
+                            or song.get("streaming_url")
+                            or song.get("downloadUrl")
+                        )
+                        if isinstance(stream_url, list):
+                            stream_url = stream_url[-1].get("url") if stream_url else None
+
+                    if not stream_url:
+                        continue
+
+                    # Get thumbnail
+                    thumbnail = None
+                    images = song.get("image", [])
+                    if isinstance(images, list):
+                        for img in reversed(images):
+                            if isinstance(img, dict) and img.get("url"):
+                                thumbnail = img["url"]
+                                break
+                            elif isinstance(img, str):
+                                thumbnail = img
+                                break
+                    elif isinstance(images, str):
+                        thumbnail = images
+
+                    # Get artists
+                    artists = song.get("artists", {})
+                    if isinstance(artists, dict):
+                        primary = artists.get("primary", [])
+                        artist_str = ", ".join(a["name"] for a in primary if a.get("name")) or song.get("primaryArtists", "Unknown")
+                    elif isinstance(artists, str):
+                        artist_str = artists
+                    else:
+                        artist_str = song.get("primaryArtists", "Unknown")
+
+                    title = song.get("name") or song.get("title") or song.get("song") or "Unknown"
+                    webpage = song.get("url") or song.get("perma_url") or ""
+                    duration = int(song.get("duration", 0))
+
+                    return {
+                        "url":         stream_url,
+                        "title":       title,
+                        "webpage_url": webpage,
+                        "duration":    duration,
+                        "uploader":    artist_str,
+                        "thumbnail":   thumbnail,
+                        "source":      "🎵 JioSaavn",
+                    }
+
+            except Exception as e:
+                print(f"[JioSaavn] Endpoint {endpoint} failed: {e}")
+                continue
 
     return None
 
 
-# ════════════════════════════════════════════
-#  Deezer Fallback (30s previews — free, no auth)
-# ════════════════════════════════════════════
-
-async def search_deezer(query: str) -> dict | None:
-    """Search Deezer API — returns 30s preview clips, no auth needed."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.deezer.com/search",
-                params={"q": query, "limit": 1},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-
-        tracks = data.get("data", [])
-        if not tracks:
-            return None
-
-        track = tracks[0]
-        preview = track.get("preview")
-        if not preview:
-            return None
-
-        return {
-            "url":         preview,
-            "title":       track.get("title", "Unknown"),
-            "webpage_url": track.get("link", ""),
-            "duration":    track.get("duration", 30),
-            "uploader":    track.get("artist", {}).get("name", "Unknown"),
-            "thumbnail":   track.get("album", {}).get("cover_medium"),
-            "source":      "Deezer 🎧 (30s preview)",
-        }
-    except Exception as e:
-        print(f"[Deezer] {e}")
-        return None
-
-
-# ════════════════════════════════════════════
-#  Main fetch — JioSaavn → Deezer
-# ════════════════════════════════════════════
-
 async def fetch_song(query: str, requester: discord.Member) -> dict:
-    # 1. Try JioSaavn (full song)
+    # Try full query
     result = await search_jiosaavn(query)
 
-    # 2. Try simplified query on JioSaavn
+    # Retry with simplified query
     if result is None and len(query.split()) > 2:
         simplified = " ".join(query.split()[:3])
-        print(f"[Retry] Simplified query: {simplified}")
+        print(f"[Retry] Simplified: {simplified}")
         result = await search_jiosaavn(simplified)
-
-    # 3. Fallback to Deezer (30s preview)
-    if result is None:
-        print(f"[Fallback] Trying Deezer for: {query}")
-        result = await search_deezer(query)
 
     if result is None:
         raise ValueError(
             f"No results found for **{query}**.\n"
-            "Try a shorter or different song name, e.g. `!play apna bana le arijit`"
+            "Try: `!play apna bana le` or `!play tum hi ho`"
         )
 
     result["requester"] = requester
